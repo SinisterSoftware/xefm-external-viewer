@@ -1,6 +1,6 @@
 [extension]
 id = "external-viewer"
-version = "0.1.0"
+version = "0.1.1"
 api_version = 1
 name = "External Viewers"
 description = "Route selected file types to external viewers."
