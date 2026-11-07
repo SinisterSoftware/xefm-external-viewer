@@ -1,82 +1,21 @@
-"""外部ビューアへの振り分け (~/.xefm/extensions/external_viewer.py)
+"""Route files to configurable external viewers."""
 
-V / Enter で開くファイルを、拡張子ごとに外部プログラムへ渡す。
-zip や ssh:// の中のファイルは、一時フォルダへ書き出してから渡す。
-
-  - 設定は EXTERNAL_VIEWERS だけ。command は次のどれか
-      ['prog', ...]  プログラムを起動 (末尾にファイルパスが付く)
-      callable       fn(ctx, path) を呼ぶ
-      None           os.startfile (関連付けで開く)
-  - config.py 側は ACTIONS / EVENT_HOOKS をマージするだけ
-"""
 import atexit
 import fnmatch
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+from xefm.user_api import extension
 
-
-# ---- Office を読み取り専用で開く (COM) -------------------------------------------
-
-def _office_readonly(prog_id, open_doc):
-    def opener(ctx, path):
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
-        app = win32com.client.Dispatch(prog_id)
-        app.Visible = True
-        open_doc(app, str(path))
-    return opener
-
-
-open_excel_readonly = _office_readonly(
-    "Excel.Application", lambda app, p: app.Workbooks.Open(p, 0, True))
-open_word_readonly = _office_readonly(
-    "Word.Application", lambda app, p: app.Documents.Open(p, False, True))
-open_powerpoint_readonly = _office_readonly(
-    "PowerPoint.Application", lambda app, p: app.Presentations.Open(p, True, False, True))
-
-
-# ---- 設定: ここを編集する ---------------------------------------------------------
-
-def _open_eml(ctx, path):
-    from mail_archive import open_eml
-    return open_eml(ctx, path)
-
-def _open_msg(ctx, path):
-    from mail_archive import open_msg
-    return open_msg(ctx, path)
-
-def _open_sqlite(ctx, path):
-    from sqlite_archive import open_sqlite
-    return open_sqlite(ctx, path)
-
-
-EXTERNAL_VIEWERS = [
-    {"pattern": ["*.pdf", "*.epub"],                "command": ["sumatrapdf"]},
-    # 新形式 (xlsx/xlsm/docx/docm/pptx/pptm) は内蔵ビューア (doc-files)。旧形式だけ Office で開く。
-    {"pattern": ["*.xls"],                          "command": open_excel_readonly},
-    {"pattern": ["*.doc"],                          "command": open_word_readonly},
-    {"pattern": ["*.ppt"],                          "command": open_powerpoint_readonly},
-    {"pattern": ["*.ts", "*.mp4", "*.mpg",
-                 "*.vob", "*.mov",
-                 "*.flac", "*.wv", "*.m4a"],        "command": ["mpv"]},
-    {"pattern": ["*.eml"],                          "command": _open_eml},
-    {"pattern": ["*.msg"],                          "command": _open_msg},
-    {"pattern": ["*.db", "*.sqlite", "*.sqlite3", "*.db3"], "command": _open_sqlite},
-]
-
-
-# ---- 仮想パスの実体化 -------------------------------------------------------------
-
+logger = logging.getLogger(__name__)
 _tmp_root = None
 
 
 def _tmp_dir():
-    """一時フォルダは最初に必要になった時に作る (起動フック不要・config 再読込に強い)。"""
     global _tmp_root
     if _tmp_root is None or not _tmp_root.exists():
         _tmp_root = Path(tempfile.mkdtemp(prefix="xefm_viewer_"))
@@ -86,53 +25,105 @@ def _tmp_dir():
 
 def _materialize(path):
     if "://" not in str(path):
-        return path                      # 本物のローカルファイル
-    target = Path(tempfile.mkdtemp(dir=_tmp_dir())) / path.name   # 同名衝突を避ける
+        return path
+    target = Path(tempfile.mkdtemp(dir=_tmp_dir())) / path.name
     target.write_bytes(path.read_bytes())
     return target
 
 
-def _find_viewer(filename):
-    name = filename.lower()
-    for entry in EXTERNAL_VIEWERS:
-        if any(fnmatch.fnmatch(name, pat.lower()) for pat in entry["pattern"]):
-            return entry
+def _find_viewer(filename, viewers):
+    if not isinstance(viewers, (list, tuple)):
+        raise ValueError("VIEWERS must be a list of rules")
+    for rule in viewers:
+        if not isinstance(rule, dict) or "pattern" not in rule or "command" not in rule:
+            raise ValueError("each VIEWERS rule needs pattern and command")
+        patterns = rule["pattern"]
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        if not isinstance(patterns, (list, tuple)) or not patterns or not all(
+            isinstance(pattern, str) and pattern for pattern in patterns
+        ):
+            raise ValueError("pattern must be a non-empty string or list of strings")
+        if any(fnmatch.fnmatchcase(filename.lower(), pattern.lower()) for pattern in patterns):
+            return rule
     return None
 
 
-# ---- XeFM 連携 --------------------------------------------------------------------
+def _open_office(kind, path):
+    import pythoncom
+    import win32com.client
 
-def open_with_external_viewer(ctx, event):
-    """file_open フック。担当外なら False を返して XeFM に任せる。"""
-    path = getattr(event, "path", event)     # フックのイベントでもパスそのものでも受ける
-    entry = _find_viewer(path.name)
-    if entry is None:
-        return False
+    pythoncom.CoInitialize()
     try:
-        target = _materialize(path)
-        command = entry["command"]
-        if command is None:
-            os.startfile(str(target))
-        elif callable(command):
-            if command(ctx, target) is False:
-                return False
-        else:
-            subprocess.Popen(list(command) + [str(target)])
-    except Exception as e:
-        ctx.message(f"外部ビューア起動失敗: {e}")
+        prog_id, collection, args = {
+            "excel": ("Excel.Application", "Workbooks", (0, True)),
+            "word": ("Word.Application", "Documents", (False, True)),
+            "powerpoint": ("PowerPoint.Application", "Presentations", (True, False, True)),
+        }[kind]
+        app = win32com.client.Dispatch(prog_id)
+        app.Visible = True
+        getattr(app, collection).Open(str(path), *args)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def _launch(ctx, command, target):
+    if command is None:
+        os.startfile(str(target))
+    elif callable(command):
+        return command(ctx, target) is not False
+    elif isinstance(command, str) and command in {
+        "office:excel", "office:word", "office:powerpoint"
+    }:
+        _open_office(command.split(":", 1)[1], target)
+    elif isinstance(command, (list, tuple)) and command and all(
+        isinstance(arg, str) and arg for arg in command
+    ):
+        subprocess.Popen([*command, str(target)])
+    else:
+        raise ValueError("command must be a non-empty argv list, callable, None, or office:excel/word/powerpoint")
     return True
 
 
+def _viewers():
+    handle = extension(__name__)
+    if handle is None or handle.settings is None:
+        raise RuntimeError("extension settings are unavailable")
+    return handle.settings.VIEWERS
+
+
+def open_with_external_viewer(ctx, event):
+    """Claim Enter only when an external viewer was started successfully."""
+    return open_path(ctx, event.path)
+
+
+def open_path(ctx, path):
+    try:
+        rule = _find_viewer(path.name, _viewers())
+        if rule is None:
+            return False
+        return _launch(ctx, rule["command"], _materialize(path))
+    except Exception as exc:
+        logger.exception("External viewer failed for %s", path)
+        ctx.message(f"External viewer failed for {path.name}: {exc}; falling back to XeFM")
+        return False
+
+
 def view_file_external(ctx):
-    """V: 対象外のファイルは従来の内蔵ビューアへ。"""
-    e = ctx.pane.focused
-    if e is not None and e.is_file and open_with_external_viewer(ctx, e.path):
-        return
+    """View the focused file externally, or use XeFM's normal viewer."""
+    entry = ctx.pane.focused
+    if entry is not None and entry.is_file:
+        if open_path(ctx, entry.path):
+            return
+        suffix = entry.path.suffix.lower()
+        action = None
+        if suffix in (".eml", ".msg"):
+            action = "mail_archive.open"
+        elif suffix in (".db", ".sqlite", ".sqlite3", ".db3"):
+            action = "sqlite_archive.open"
+        if action and action in ctx.action_names():
+            previous_path = ctx.pane.path
+            ctx.invoke(action)
+            if ctx.pane.path != previous_path:
+                return
     ctx.invoke("view_file")
-
-
-ACTIONS = {"view_file": {"func": view_file_external, "override": True}}
-EVENT_HOOKS = {"file_open": [open_with_external_viewer]}
-
-
-

@@ -1,10 +1,10 @@
 [extension]
 id = "external-viewer"
-version = "0.1.1"
+version = "0.2.0"
 api_version = 1
 name = "External Viewers"
 description = "Route selected file types to external viewers."
-min_xefm = "1.10.0"
+min_xefm = "1.13.0"
 platforms = ["windows"]
 updates = "github:SinisterSoftware/xefm-external-viewer"
 
@@ -14,8 +14,11 @@ updates = "github:SinisterSoftware/xefm-external-viewer"
 [contributes.event_hooks]
 file_open = "external_viewer.logic:open_with_external_viewer"
 
+[settings]
+defaults = "external_viewer.settings:Settings"
+
 [requires]
-python_packages = ["pywin32", "extract-msg"]
+python_packages = ["pywin32"]
 
 [contributes.key_suggestions]
 "external-viewer.view-file" = ["V"]
