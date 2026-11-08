@@ -85,7 +85,9 @@ def test_unmatched_and_empty_focus_fall_back(context):
     ("a.eml", "mail_archive.open"),
     ("a.MSG", "mail_archive.open"),
     ("a.db", "sqlite_archive.open"),
+    ("a.sqlite", "sqlite_archive.open"),
     ("a.SQLITE3", "sqlite_archive.open"),
+    ("a.db3", "sqlite_archive.open"),
 ])
 def test_archive_action_only_claims_when_pane_changes(context, filename, action):
     context.pane.focused = SimpleNamespace(is_file=True, path=Path(filename))
@@ -104,6 +106,68 @@ def test_archive_action_only_claims_when_pane_changes(context, filename, action)
     context.action_names = lambda: []
     logic.view_file_external(context)
     assert context.invoked[-1] == "view_file"
+
+
+@pytest.mark.parametrize(("filename", "action"), [
+    ("a.eml", "mail_archive.open"),
+    ("a.MSG", "mail_archive.open"),
+    ("a.db", "sqlite_archive.open"),
+    ("a.SQLITE", "sqlite_archive.open"),
+    ("a.sqlite3", "sqlite_archive.open"),
+    ("a.DB3", "sqlite_archive.open"),
+])
+def test_hook_delegates_to_archive_only_if_pane_changes(context, filename, action):
+    path = Path(filename)
+    context.pane.focused = SimpleNamespace(is_file=True, path=path)
+    context.action_names = lambda: [action]
+
+    assert not logic.open_with_external_viewer(context, SimpleNamespace(path=path))
+    assert context.invoked == [action]
+
+    def navigate(name):
+        context.invoked.append(name)
+        context.pane.path = Path("archive")
+
+    context.invoke = navigate
+    assert logic.open_with_external_viewer(context, SimpleNamespace(path=path))
+    assert context.invoked == [action, action]
+
+
+def test_hook_declines_unavailable_or_unsupported_archive(context):
+    for filename in ("a.eml", "a.db", "a.txt"):
+        path = Path(filename)
+        context.pane.focused = SimpleNamespace(is_file=True, path=path)
+        context.action_names = lambda: ["mail_archive.open"] if filename == "a.txt" else []
+        assert not logic.open_with_external_viewer(context, SimpleNamespace(path=path))
+    assert context.invoked == []
+
+
+def test_hook_does_not_invoke_archive_for_a_different_or_non_file_focus(context):
+    path = Path("a.eml")
+    context.action_names = lambda: ["mail_archive.open"]
+    for entry in (None, SimpleNamespace(is_file=False, path=path),
+                  SimpleNamespace(is_file=True, path=Path("other.eml"))):
+        context.pane.focused = entry
+        assert not logic.open_with_external_viewer(context, SimpleNamespace(path=path))
+    assert context.invoked == []
+
+
+@pytest.mark.parametrize("viewer_result", [True, False])
+def test_hook_prefers_configured_viewer_before_archive(context, monkeypatch, viewer_result):
+    path = Path("a.eml")
+    context.pane.focused = SimpleNamespace(is_file=True, path=path)
+    context.action_names = lambda: ["mail_archive.open"]
+    monkeypatch.setattr(logic, "_viewers", lambda: [
+        {"pattern": "*.eml", "command": lambda ctx, target: viewer_result},
+    ])
+
+    def navigate(name):
+        context.invoked.append(name)
+        context.pane.path = Path("archive")
+
+    context.invoke = navigate
+    assert logic.open_with_external_viewer(context, SimpleNamespace(path=path))
+    assert context.invoked == ([] if viewer_result else ["mail_archive.open"])
 
 
 @pytest.mark.parametrize("viewers", [None, [{}], [{"pattern": [], "command": None}]])
