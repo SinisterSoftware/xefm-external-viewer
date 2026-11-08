@@ -93,8 +93,8 @@ def _viewers():
 
 
 def open_with_external_viewer(ctx, event):
-    """Claim Enter only when an external viewer was started successfully."""
-    return open_path(ctx, event.path)
+    """Claim Enter when an external viewer or archive action handles the file."""
+    return open_path(ctx, event.path) or _open_archive(ctx, event.path)
 
 
 def open_path(ctx, path):
@@ -109,21 +109,28 @@ def open_path(ctx, path):
         return False
 
 
+def _open_archive(ctx, path):
+    entry = ctx.pane.focused
+    if entry is None or not entry.is_file or entry.path != path:
+        return False
+    suffix = path.suffix.lower()
+    if suffix in (".eml", ".msg"):
+        action = "mail_archive.open"
+    elif suffix in (".db", ".sqlite", ".sqlite3", ".db3"):
+        action = "sqlite_archive.open"
+    else:
+        return False
+    if action not in ctx.action_names():
+        return False
+    previous_path = ctx.pane.path
+    ctx.invoke(action)
+    return ctx.pane.path != previous_path
+
+
 def view_file_external(ctx):
     """View the focused file externally, or use XeFM's normal viewer."""
     entry = ctx.pane.focused
     if entry is not None and entry.is_file:
-        if open_path(ctx, entry.path):
+        if open_path(ctx, entry.path) or _open_archive(ctx, entry.path):
             return
-        suffix = entry.path.suffix.lower()
-        action = None
-        if suffix in (".eml", ".msg"):
-            action = "mail_archive.open"
-        elif suffix in (".db", ".sqlite", ".sqlite3", ".db3"):
-            action = "sqlite_archive.open"
-        if action and action in ctx.action_names():
-            previous_path = ctx.pane.path
-            ctx.invoke(action)
-            if ctx.pane.path != previous_path:
-                return
     ctx.invoke("view_file")

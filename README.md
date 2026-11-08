@@ -40,20 +40,21 @@ available in the command palette. A successful launch claims the file; if
 the program cannot be started, Office automation fails, a rule is invalid,
 or a virtual file cannot be copied, the error is logged and the extension
 declines the open. Enter then continues through XeFM's other hooks and normal
-file handling; the action uses XeFM's normal `view_file` action, which can
-itself honor `FILE_ASSOCIATIONS`. Whether XeFM has a built-in viewer for the
-file depends on its format. Failures after an external process starts cannot
-be detected or trigger fallback.
+file handling if no archive action handles it; the action uses XeFM's normal
+`view_file` action, which can itself honor `FILE_ASSOCIATIONS`. Whether XeFM
+has a built-in viewer for the file depends on its format. Failures after an
+external process starts cannot be detected or trigger fallback.
 
 Mail and SQLite files are intentionally absent from the default rules. Their
-respective extensions own their Enter hooks; neither needs to be installed.
-For `V`, the External Viewers action uses Mail Archive's `mail_archive.open`
-for `.eml` and `.msg` and SQLite Archive's `sqlite_archive.open` for `.db`,
-`.sqlite`, `.sqlite3`, and `.db3` when available. If the action is unavailable
-or does not navigate, it uses the normal viewer instead.
-XeFM runs *all* `file_open` hooks even if one claims the event. Do not
-configure overlapping rules for files handled by another installed extension:
-both hooks could open the file or change the pane.
+extensions are optional. For both Enter and `V`, External Viewers first tries
+any configured viewer, then invokes Mail Archive's `mail_archive.open` for
+`.eml` and `.msg` or SQLite Archive's `sqlite_archive.open` for `.db`,
+`.sqlite`, `.sqlite3`, and `.db3` when the action is available. The archive
+action handles the file only if it changes the pane's location. Otherwise,
+Enter falls through to XeFM's normal file handling and `V` uses the normal
+viewer. XeFM 1.13.1 accepts only one extension manifest contribution for a
+given hook key, so this delegation lets the archive actions work when External
+Viewers owns the `file_open` hook.
 
 Remote and archive files are copied to a uniquely named temporary directory
 before an external program is launched. The copy is removed when XeFM exits;
