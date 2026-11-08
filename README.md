@@ -1,5 +1,7 @@
 # External Viewers
 
+[日本語版](README.ja.md)
+
 A Windows XeFM extension that routes selected files to external viewers. XeFM
 1.13.0 or later is required. Install with:
 
